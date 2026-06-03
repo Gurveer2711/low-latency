@@ -2,7 +2,7 @@ import { Worker, Job } from "bullmq";
 import { config } from "./config/env";
 import { prisma } from "./lib/prisma";
 import { downloadFromS3, uploadToS3 } from "./lib/s3";
-import { transcodeTo480p } from "./lib/transcoder";
+import { transcodeTo480p, generateThumbnail } from "./lib/transcoder"; // added generateThumbnail
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -19,49 +19,59 @@ const worker = new Worker(
 
     console.log(`\n🎬 Job ${job.id} started for video ${videoId}`);
 
-    // Use OS temp folder for intermediate files
+    // define all temp file paths upfront
     const tmpDir = os.tmpdir();
     const inputPath = path.join(tmpDir, `${videoId}-raw.mp4`);
     const outputPath = path.join(tmpDir, `${videoId}-480p.mp4`);
-    const outputKey = `processed/${videoId}/480p.mp4`;
+    const thumbPath = path.join(tmpDir, `${videoId}-thumb.jpg`); 
 
+    // define S3 destination keys
+    const outputKey = `processed/${videoId}/480p.mp4`;
+    const thumbKey = `processed/${videoId}/thumb.jpg`; 
     try {
-      // 1. Update status → processing
+      // 1. update status → processing
       await prisma.video.update({
         where: { id: videoId },
         data: { status: "processing" },
       });
       console.log(`📝 Status → processing`);
 
-      // 2. Download raw video from S3
+      // 2. download raw video from S3 to local disk
       await downloadFromS3(rawKey, inputPath);
 
-      // 3. Transcode to 480p
+      // 3. transcode to 480p
       await transcodeTo480p(inputPath, outputPath);
 
-      // 4. Upload transcoded video to S3
+      // 4. generate thumbnail from transcoded video
+      await generateThumbnail(outputPath, thumbPath);
+
+      // 5. upload transcoded video to S3
       await uploadToS3(outputPath, outputKey, "video/mp4");
 
-      // 5. Update DB with processed key + status
+      // 6. upload thumbnail to S3
+      await uploadToS3(thumbPath, thumbKey, "image/jpeg");
+
+      // 7. update DB with all results
       await prisma.video.update({
         where: { id: videoId },
         data: {
           status: "processed",
           variants: { "480p": outputKey },
+          thumbKey: thumbKey, // save thumbnail S3 key
         },
       });
       console.log(`📝 Status → processed`);
+      console.log(`🖼️  Thumbnail saved at ${thumbKey}`);
     } finally {
-      // 6. Always clean up temp files
+      // always clean up temp files even if something fails
       if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); 
       console.log(`🧹 Temp files cleaned up`);
     }
   },
   {
-    connection: {
-      url: config.redis.url,
-    },
+    connection: { url: config.redis.url },
     concurrency: 2,
   },
 );

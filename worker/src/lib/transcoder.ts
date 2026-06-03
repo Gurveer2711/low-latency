@@ -36,3 +36,29 @@ export async function transcodeTo480p(
       .run();
   });
 }
+
+// extracts a single frame from video as a jpg thumbnail
+export async function generateThumbnail(
+  inputPath: string,  // path to local video file
+  outputPath: string  // path to save thumbnail jpg
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .outputOptions([
+        '-ss 00:00:02',    // seek to 2 seconds into video
+        '-vframes 1',      // extract exactly 1 frame
+        '-vf scale=854:480', // same size as 480p
+        '-q:v 2',          // jpeg quality (1=best, 31=worst, 2=near perfect)
+      ])
+      .output(outputPath)
+      .on('end', () => {
+        console.log(`🖼️  Thumbnail generated → ${outputPath}`)
+        resolve()
+      })
+      .on('error', (err) => {
+        console.error(`❌ Thumbnail error:`, err.message)
+        reject(err)
+      })
+      .run()
+  })
+}

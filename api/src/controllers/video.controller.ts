@@ -48,12 +48,24 @@ export const getPlaybackUrl = async (req: Request, res: Response) => {
     const playUrl = await getSignedUrl(s3, command, {
       expiresIn: 3600, // 1 hour
     });
-
+    // generate signed URL for thumbnail (if exists)
+    let thumbUrl = null;
+    if (video.thumbKey) {
+      thumbUrl = await getSignedUrl(
+        s3,
+        new GetObjectCommand({
+          Bucket: config.aws.bucket,
+          Key: video.thumbKey,
+        }),
+        { expiresIn: 3600 },
+      );
+    } 
     // 6. return playback URL
     res.json({
       videoId: video.id,
       title: video.title,
       playUrl, // paste this in browser to watch!
+      thumbUrl,
       expiresIn: 3600,
     });
   } catch (error) {
