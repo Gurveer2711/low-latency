@@ -9,15 +9,16 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
-
+  
 model Video {
   id        String   @id @default(uuid())
-  title     String  //title of the video
+  title     String //title of the video
   status    String   @default("pending") // pending, uploaded, processing, processed, failed
-  rawKey    String?  // The S3 path to the original file
-  thumbKey  String?  // The S3 path to the thumbnail
-  variants  Json?    // Stores different resolutions: { "480p": "path/to/video" }
+  rawKey    String? // The S3 path to the original file
+  thumbKey  String? // The S3 path to the thumbnail
+  variants  Json? // Stores different resolutions: { "480p": "path/to/video" }
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
