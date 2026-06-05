@@ -2,7 +2,7 @@ import { Worker, Job } from "bullmq";
 import { config } from "./config/env";
 import { prisma } from "./lib/prisma";
 import { downloadFromS3, uploadToS3 } from "./lib/s3";
-import { transcodeTo480p, generateThumbnail } from "./lib/transcoder"; // added generateThumbnail
+import { transcodeTo480p, generateThumbnail } from "./lib/transcoder";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -17,56 +17,79 @@ const worker = new Worker(
   async (job: Job<TranscodeJobData>) => {
     const { videoId, rawKey } = job.data;
 
-    console.log(`\n🎬 Job ${job.id} started for video ${videoId}`);
+    console.log(
+      `\n🎬 Job ${job.id} started | attempt ${job.attemptsMade + 1}/3`,
+    );
 
-    // define all temp file paths upfront
     const tmpDir = os.tmpdir();
     const inputPath = path.join(tmpDir, `${videoId}-raw.mp4`);
     const outputPath = path.join(tmpDir, `${videoId}-480p.mp4`);
-    const thumbPath = path.join(tmpDir, `${videoId}-thumb.jpg`); 
-
-    // define S3 destination keys
+    const thumbPath = path.join(tmpDir, `${videoId}-thumb.jpg`);
     const outputKey = `processed/${videoId}/480p.mp4`;
-    const thumbKey = `processed/${videoId}/thumb.jpg`; 
+    const thumbKey = `processed/${videoId}/thumb.jpg`;
+
     try {
-      // 1. update status → processing
+      // update status → processing
       await prisma.video.update({
         where: { id: videoId },
-        data: { status: "processing" },
+        data: {
+          status: "processing",
+        },
       });
-      console.log(`📝 Status → processing`);
 
-      // 2. download raw video from S3 to local disk
+      // download → transcode → thumbnail → upload
       await downloadFromS3(rawKey, inputPath);
-
-      // 3. transcode to 480p
       await transcodeTo480p(inputPath, outputPath);
-
-      // 4. generate thumbnail from transcoded video
       await generateThumbnail(outputPath, thumbPath);
-
-      // 5. upload transcoded video to S3
       await uploadToS3(outputPath, outputKey, "video/mp4");
-
-      // 6. upload thumbnail to S3
       await uploadToS3(thumbPath, thumbKey, "image/jpeg");
 
-      // 7. update DB with all results
+      // update DB → processed
       await prisma.video.update({
         where: { id: videoId },
         data: {
           status: "processed",
           variants: { "480p": outputKey },
-          thumbKey: thumbKey, // save thumbnail S3 key
+          thumbKey,
         },
       });
-      console.log(`📝 Status → processed`);
-      console.log(`🖼️  Thumbnail saved at ${thumbKey}`);
+
+      console.log(`✅ Job ${job.id} completed`);
+    } catch (error) {
+      const err = error as Error;
+
+      // check if this was the LAST attempt
+      const isLastAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 3);
+
+      if (isLastAttempt) {
+        // all retries exhausted → mark as failed in DB
+        console.error(`💀 Job ${job.id} exhausted all retries → moving to DLQ`);
+
+        await prisma.video.update({
+          where: { id: videoId },
+          data: {
+            status: "failed", // mark as failed in DB
+            variants: {
+              // store error details in variants
+              error: err.message,
+              failedAt: new Date().toISOString(),
+              attempts: job.attemptsMade + 1,
+            },
+          },
+        });
+      } else {
+        // more retries coming → log and rethrow so BullMQ retries
+        console.warn(
+          `⚠️  Job ${job.id} failed attempt ${job.attemptsMade + 1} → retrying...`,
+        );
+      }
+
+      throw error; // always rethrow so BullMQ knows job failed
     } finally {
-      // always clean up temp files even if something fails
+      // always clean up temp files
       if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-      if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); 
+      if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
       console.log(`🧹 Temp files cleaned up`);
     }
   },
@@ -76,10 +99,12 @@ const worker = new Worker(
   },
 );
 
+// job completed successfully
 worker.on("completed", (job) => {
-  console.log(`✅ Job ${job.id} completed successfully`);
+  console.log(`✅ Job ${job.id} done`);
 });
 
+// job failed one attempt (will retry)
 worker.on("failed", (job, error) => {
   console.error(`❌ Job ${job?.id} failed:`, error.message);
 });

@@ -4,6 +4,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner"; // generates tempo
 import { prisma } from "../lib/prisma"; // DB connection
 import { s3 } from "../lib/s3"; // S3 connection
 import { config } from "../config/env"; // env variables
+import { transcodeQueue } from "../lib/queue";
 
 export const getPlaybackUrl = async (req: Request, res: Response) => {
   try {
@@ -101,3 +102,25 @@ export const getVideoStatus = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to get video status" });
   }
 };
+
+// get all failed jobs from the queue
+export const getFailedJobs = async (req: Request, res: Response) => {
+  try {
+    // get all jobs in failed state
+    const failedJobs = await transcodeQueue.getFailed()
+
+      const jobs = failedJobs.map((job) => ({
+        jobId: job.id,
+        videoId: job.data.videoId,
+        failedReason: job.failedReason, // why it failed
+        attemptsMade: job.attemptsMade, // how many times tried
+        failedAt: new Date(job.timestamp).toLocaleString(), // when job was created
+      }));
+
+    res.json({ count: jobs.length, jobs })
+
+  } catch (error) {
+    console.error('Failed jobs error:', error)
+    res.status(500).json({ error: 'Failed to get failed jobs' })
+  }
+}
