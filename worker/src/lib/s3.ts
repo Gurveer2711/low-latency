@@ -4,8 +4,8 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { config } from "../config/env";
+import { logger } from "./logger";
 import fs from "fs";
-import path from "path";
 import { Readable } from "stream";
 
 export const s3 = new S3Client({
@@ -16,16 +16,11 @@ export const s3 = new S3Client({
   },
 });
 
-// Download a file from S3 to local disk
 export async function downloadFromS3(
   key: string,
   localPath: string,
 ): Promise<void> {
-  const command = new GetObjectCommand({
-    Bucket: config.aws.bucket,
-    Key: key,
-  });
-
+  const command = new GetObjectCommand({ Bucket: config.aws.bucket, Key: key });
   const response = await s3.send(command);
   const stream = response.Body as Readable;
 
@@ -36,10 +31,9 @@ export async function downloadFromS3(
     fileStream.on("error", reject);
   });
 
-  console.log(`⬇️  Downloaded ${key} to ${localPath}`);
+  logger.info({ key, localPath }, "⬇️  Downloaded from S3"); 
 }
 
-// Upload a file from local disk to S3
 export async function uploadToS3(
   localPath: string,
   key: string,
@@ -57,5 +51,5 @@ export async function uploadToS3(
   });
 
   await s3.send(command);
-  console.log(`⬆️  Uploaded ${localPath} to S3 as ${key}`);
+  logger.info({ key, localPath }, "⬆️  Uploaded to S3"); 
 }

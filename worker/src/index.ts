@@ -3,6 +3,7 @@ import { config } from "./config/env";
 import { prisma } from "./lib/prisma";
 import { downloadFromS3, uploadToS3 } from "./lib/s3";
 import { transcodeTo480p, generateThumbnail } from "./lib/transcoder";
+import { logger } from "./lib/logger";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -16,9 +17,11 @@ const worker = new Worker(
   "transcode",
   async (job: Job<TranscodeJobData>) => {
     const { videoId, rawKey } = job.data;
+    const startTime = Date.now(); // track total processing time
 
-    console.log(
-      `\n🎬 Job ${job.id} started | attempt ${job.attemptsMade + 1}/3`,
+    logger.info(
+      { jobId: job.id, videoId, attempt: job.attemptsMade + 1 },
+      "Job started",
     );
 
     const tmpDir = os.tmpdir();
@@ -29,22 +32,24 @@ const worker = new Worker(
     const thumbKey = `processed/${videoId}/thumb.jpg`;
 
     try {
-      // update status → processing
       await prisma.video.update({
         where: { id: videoId },
-        data: {
-          status: "processing",
-        },
+        data: { status: "processing" },
       });
 
-      // download → transcode → thumbnail → upload
       await downloadFromS3(rawKey, inputPath);
+      logger.info({ jobId: job.id, videoId }, "Downloaded from S3");
+
       await transcodeTo480p(inputPath, outputPath);
+      logger.info({ jobId: job.id, videoId }, "Transcoding complete");
+
       await generateThumbnail(outputPath, thumbPath);
+      logger.info({ jobId: job.id, videoId }, "Thumbnail generated");
+
       await uploadToS3(outputPath, outputKey, "video/mp4");
       await uploadToS3(thumbPath, thumbKey, "image/jpeg");
+      logger.info({ jobId: job.id, videoId }, "Uploaded to S3");
 
-      // update DB → processed
       await prisma.video.update({
         where: { id: videoId },
         data: {
@@ -54,23 +59,23 @@ const worker = new Worker(
         },
       });
 
-      console.log(`✅ Job ${job.id} completed`);
+      const durationMs = Date.now() - startTime;
+      logger.info({ jobId: job.id, videoId, durationMs }, "Job completed");
     } catch (error) {
       const err = error as Error;
-
-      // check if this was the LAST attempt
       const isLastAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 3);
 
       if (isLastAttempt) {
-        // all retries exhausted → mark as failed in DB
-        console.error(`💀 Job ${job.id} exhausted all retries → moving to DLQ`);
+        logger.error(
+          { jobId: job.id, videoId, error: err.message },
+          "Job exhausted all retries",
+        );
 
         await prisma.video.update({
           where: { id: videoId },
           data: {
-            status: "failed", // mark as failed in DB
+            status: "failed",
             variants: {
-              // store error details in variants
               error: err.message,
               failedAt: new Date().toISOString(),
               attempts: job.attemptsMade + 1,
@@ -78,19 +83,23 @@ const worker = new Worker(
           },
         });
       } else {
-        // more retries coming → log and rethrow so BullMQ retries
-        console.warn(
-          `⚠️  Job ${job.id} failed attempt ${job.attemptsMade + 1} → retrying...`,
+        logger.warn(
+          {
+            jobId: job.id,
+            videoId,
+            attempt: job.attemptsMade + 1,
+            error: err.message,
+          },
+          "Job attempt failed, retrying",
         );
       }
 
-      throw error; // always rethrow so BullMQ knows job failed
+      throw error;
     } finally {
-      // always clean up temp files
       if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
       if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-      console.log(`🧹 Temp files cleaned up`);
+      logger.info({ jobId: job.id, videoId }, "Temp files cleaned up");
     }
   },
   {
@@ -99,14 +108,12 @@ const worker = new Worker(
   },
 );
 
-// job completed successfully
 worker.on("completed", (job) => {
-  console.log(`✅ Job ${job.id} done`);
+  logger.info({ jobId: job.id }, "Worker completed job");
 });
 
-// job failed one attempt (will retry)
 worker.on("failed", (job, error) => {
-  console.error(`❌ Job ${job?.id} failed:`, error.message);
+  logger.error({ jobId: job?.id, error: error.message }, "Worker job failed");
 });
 
-console.log("🚀 Worker running and waiting for jobs...");
+logger.info("🚀 Worker running and waiting for jobs...");

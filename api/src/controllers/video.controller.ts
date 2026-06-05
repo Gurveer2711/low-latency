@@ -5,7 +5,7 @@ import { prisma } from "../lib/prisma"; // DB connection
 import { s3 } from "../lib/s3"; // S3 connection
 import { config } from "../config/env"; // env variables
 import { transcodeQueue } from "../lib/queue";
-
+import { logger } from "../lib/logger";
 export const getPlaybackUrl = async (req: Request, res: Response) => {
   try {
     const { id } = req.params; // get video id from URL: /videos/abc123/play
@@ -70,7 +70,7 @@ export const getPlaybackUrl = async (req: Request, res: Response) => {
       expiresIn: 3600,
     });
   } catch (error) {
-    console.error("Playback error:", error);
+    logger.error({ error }, "Failed to generate playback URL");
     res.status(500).json({ error: "Failed to generate playback URL" });
   }
 };
@@ -98,7 +98,7 @@ export const getVideoStatus = async (req: Request, res: Response) => {
 
     res.json(video);
   } catch (error) {
-    console.error("Status error:", error);
+    logger.error({ error }, "Failed to get video status");
     res.status(500).json({ error: "Failed to get video status" });
   }
 };
@@ -116,11 +116,11 @@ export const getFailedJobs = async (req: Request, res: Response) => {
         attemptsMade: job.attemptsMade, // how many times tried
         failedAt: new Date(job.timestamp).toLocaleString(), // when job was created
       }));
-
+    logger.info({ count: jobs.length }, "Failed jobs fetched");
     res.json({ count: jobs.length, jobs })
 
   } catch (error) {
-    console.error('Failed jobs error:', error)
+    logger.error({ error }, "Failed to get failed jobs");
     res.status(500).json({ error: 'Failed to get failed jobs' })
   }
 }

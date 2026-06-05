@@ -1,7 +1,7 @@
 import ffmpeg from "fluent-ffmpeg";
 import path from "path";
 import fs from "fs";
-
+import { logger } from "./logger";
 // Transcode video to 480p
 export async function transcodeTo480p(
   inputPath: string,
@@ -20,17 +20,17 @@ export async function transcodeTo480p(
       ])
       .output(outputPath)
       .on("start", (cmd) => {
-        console.log(`🎬 FFmpeg started`);
+        logger.info(`🎬 FFmpeg started`);
       })
       .on("progress", (progress) => {
-        console.log(`⚙️  Transcoding: ${Math.round(progress.percent ?? 0)}%`);
+        logger.info(`⚙️  Transcoding: ${Math.round(progress.percent ?? 0)}%`);
       })
       .on("end", () => {
-        console.log(`✅ Transcoding complete → ${outputPath}`);
+        logger.info(`✅ Transcoding complete → ${outputPath}`);
         resolve();
       })
       .on("error", (err) => {
-        console.error(`❌ FFmpeg error:`, err.message);
+        logger.error({ err:err.message }, `❌ FFmpeg error:`);
         reject(err);
       })
       .run();
@@ -52,11 +52,11 @@ export async function generateThumbnail(
       ])
       .output(outputPath)
       .on('end', () => {
-        console.log(`🖼️  Thumbnail generated → ${outputPath}`)
+        logger.info(`🖼️  Thumbnail generated → ${outputPath}`)
         resolve()
       })
       .on('error', (err) => {
-        console.error(`❌ Thumbnail error:`, err.message)
+        logger.error({ err:err.message }, `❌ Thumbnail error:`)
         reject(err)
       })
       .run()
