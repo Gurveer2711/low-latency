@@ -4,6 +4,8 @@ import { logger } from "./lib/logger"; // new
 import uploadRouter from "./routes/upload.routes";
 import webhookRouter from "./routes/webhook.routes";
 import videoRouter from "./routes/video.routes";
+import authRouter from "./routes/auth.routes";
+import adminRouter from "./routes/admin.routes";
 
 const app = express();
 
@@ -32,6 +34,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.use("/upload", uploadRouter);
 app.use("/webhook", webhookRouter);
 app.use("/videos", videoRouter);
+app.use("/auth", authRouter);
+app.use("/admin", adminRouter);
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });

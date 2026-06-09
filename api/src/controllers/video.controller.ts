@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { GetObjectCommand } from "@aws-sdk/client-s3"; // command to GET object from S3
+import { GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3"; // commands for S3
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"; // generates temporary URL
 import { prisma } from "../lib/prisma"; // DB connection
 import { s3 } from "../lib/s3"; // S3 connection
@@ -72,6 +72,84 @@ export const getPlaybackUrl = async (req: Request, res: Response) => {
   } catch (error) {
     logger.error({ error }, "Failed to generate playback URL");
     res.status(500).json({ error: "Failed to generate playback URL" });
+  }
+};
+
+// public listing of videos (only public visibility)
+export const listPublicVideos = async (req: Request, res: Response) => {
+  try {
+    const videos = await prisma.video.findMany({
+      where: { visibility: "public" },
+      select: { id: true, title: true, thumbKey: true, createdAt: true, visibility: true },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ count: videos.length, videos });
+  } catch (error) {
+    logger.error({ error }, "Failed to list public videos");
+    res.status(500).json({ error: "Failed to list videos" });
+  }
+};
+
+// current user's videos
+export const listMyVideos = async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const videos = await prisma.video.findMany({ where: { userId: user.id } });
+    res.json({ count: videos.length, videos });
+  } catch (error) {
+    logger.error({ error }, "Failed to list user videos");
+    res.status(500).json({ error: "Failed to list videos" });
+  }
+};
+
+export const patchVideo = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { title, description, visibility } = req.body;
+    const user = (req as any).user;
+
+    const video = await prisma.video.findUnique({ where: { id } });
+    if (!video) return res.status(404).json({ error: "Video not found" });
+    if (video.userId !== user.id) return res.status(403).json({ error: "Not owner" });
+
+    const updated = await prisma.video.update({ where: { id }, data: { title, description, visibility } });
+    res.json({ video: updated });
+  } catch (error) {
+    logger.error({ error }, "Failed to patch video");
+    res.status(500).json({ error: "Failed to update video" });
+  }
+};
+
+export const deleteVideo = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const video = await prisma.video.findUnique({ where: { id } });
+    if (!video) return res.status(404).json({ error: "Video not found" });
+    // allow owner or admin
+    if (video.userId !== user.id && user.role !== "admin") return res.status(403).json({ error: "Not allowed" });
+
+    // delete S3 files if present
+    if (video.rawKey) {
+      try {
+        await s3.send(new DeleteObjectCommand({ Bucket: config.aws.bucket, Key: video.rawKey }));
+      } catch (e) {
+        logger.warn({ err: e }, "Failed to delete rawKey from S3");
+      }
+    }
+    if (video.thumbKey) {
+      try {
+        await s3.send(new DeleteObjectCommand({ Bucket: config.aws.bucket, Key: video.thumbKey }));
+      } catch (e) {
+        logger.warn({ err: e }, "Failed to delete thumbKey from S3");
+      }
+    }
+
+    await prisma.video.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (error) {
+    logger.error({ error }, "Failed to delete video");
+    res.status(500).json({ error: "Failed to delete video" });
   }
 };
 
