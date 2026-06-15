@@ -1,14 +1,16 @@
 import express, { Request, Response, NextFunction } from "express";
+import cors from "cors";
 import { config } from "./config/env";
-import { logger } from "./lib/logger"; // new
 import uploadRouter from "./routes/upload.routes";
 import webhookRouter from "./routes/webhook.routes";
 import videoRouter from "./routes/video.routes";
 import authRouter from "./routes/auth.routes";
 import adminRouter from "./routes/admin.routes";
+import { logger } from "./lib/logger";
 
 const app = express();
 
+app.use(cors());
 app.use(express.json());
 
 // request logger middleware — logs every incoming request

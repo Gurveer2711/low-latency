@@ -5,7 +5,7 @@ import { logger } from "../lib/logger"; // new
 
 export const handleS3Upload = async (req: Request, res: Response) => {
   try {
-    const { videoId, rawKey, title } = req.body;
+    const { videoId, rawKey, title, userId } = req.body;
 
     if (!videoId || !rawKey || !title) {
       logger.warn({ videoId, rawKey, title }, "Missing webhook fields");
@@ -14,7 +14,7 @@ export const handleS3Upload = async (req: Request, res: Response) => {
     }
 
     const video = await prisma.video.create({
-      data: { id: videoId, title, rawKey, status: "pending" },
+      data: { id: videoId, title, rawKey, status: "pending", userId },
     });
 
     const job = await transcodeQueue.add("transcode-video", {
