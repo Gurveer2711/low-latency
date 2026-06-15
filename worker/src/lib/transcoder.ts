@@ -1,16 +1,25 @@
 import ffmpeg from "fluent-ffmpeg";
-import path from "path";
-import fs from "fs";
 import { logger } from "./logger";
-// Transcode video to 480p
-export async function transcodeTo480p(
+
+export type VideoVariantFormat = "480p" | "720p" | "1080p";
+
+const formatScaleMap: Record<VideoVariantFormat, string> = {
+  "480p": "854:480",
+  "720p": "1280:720",
+  "1080p": "1920:1080",
+};
+
+export async function transcodeToFormat(
   inputPath: string,
   outputPath: string,
+  format: VideoVariantFormat,
 ): Promise<void> {
+  const scale = formatScaleMap[format];
+
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
       .outputOptions([
-        "-vf scale=854:480", // resize to 480p (854x480)
+        `-vf scale=${scale}`,
         "-c:v libx264", // video codec: H.264 (most compatible)
         "-crf 23", // quality (18=best, 28=worst, 23=default)
         "-preset fast", // encoding speed vs compression tradeoff
@@ -20,17 +29,20 @@ export async function transcodeTo480p(
       ])
       .output(outputPath)
       .on("start", (cmd) => {
-        logger.info(`🎬 FFmpeg started`);
+        logger.info({ format, cmd }, "FFmpeg started");
       })
       .on("progress", (progress) => {
-        logger.info(`⚙️  Transcoding: ${Math.round(progress.percent ?? 0)}%`);
+        logger.info(
+          { format, percent: Math.round(progress.percent ?? 0) },
+          "Transcoding in progress",
+        );
       })
       .on("end", () => {
-        logger.info(`✅ Transcoding complete → ${outputPath}`);
+        logger.info({ format, outputPath }, "Transcoding complete");
         resolve();
       })
       .on("error", (err) => {
-        logger.error({ err:err.message }, `❌ FFmpeg error:`);
+        logger.error({ format, err: err.message }, "FFmpeg error");
         reject(err);
       })
       .run();

@@ -2,7 +2,11 @@ import { Worker, Job } from "bullmq";
 import { config } from "./config/env";
 import { prisma } from "./lib/prisma";
 import { downloadFromS3, uploadToS3 } from "./lib/s3";
-import { transcodeTo480p, generateThumbnail } from "./lib/transcoder";
+import {
+  transcodeToFormat,
+  generateThumbnail,
+  VideoVariantFormat,
+} from "./lib/transcoder";
 import { logger } from "./lib/logger";
 import path from "path";
 import fs from "fs";
@@ -12,6 +16,8 @@ interface TranscodeJobData {
   videoId: string;
   rawKey: string;
 }
+
+const TARGET_FORMATS: VideoVariantFormat[] = ["480p", "720p", "1080p"];
 
 const worker = new Worker(
   "transcode",
@@ -26,9 +32,17 @@ const worker = new Worker(
 
     const tmpDir = os.tmpdir();
     const inputPath = path.join(tmpDir, `${videoId}-raw.mp4`);
-    const outputPath = path.join(tmpDir, `${videoId}-480p.mp4`);
+    const outputPaths: Record<VideoVariantFormat, string> = {
+      "480p": path.join(tmpDir, `${videoId}-480p.mp4`),
+      "720p": path.join(tmpDir, `${videoId}-720p.mp4`),
+      "1080p": path.join(tmpDir, `${videoId}-1080p.mp4`),
+    };
     const thumbPath = path.join(tmpDir, `${videoId}-thumb.jpg`);
-    const outputKey = `processed/${videoId}/480p.mp4`;
+    const outputKeys: Record<VideoVariantFormat, string> = {
+      "480p": `processed/${videoId}/480p.mp4`,
+      "720p": `processed/${videoId}/720p.mp4`,
+      "1080p": `processed/${videoId}/1080p.mp4`,
+    };
     const thumbKey = `processed/${videoId}/thumb.jpg`;
 
     try {
@@ -40,13 +54,17 @@ const worker = new Worker(
       await downloadFromS3(rawKey, inputPath);
       logger.info({ jobId: job.id, videoId }, "Downloaded from S3");
 
-      await transcodeTo480p(inputPath, outputPath);
-      logger.info({ jobId: job.id, videoId }, "Transcoding complete");
+      for (const format of TARGET_FORMATS) {
+        await transcodeToFormat(inputPath, outputPaths[format], format);
+      }
+      logger.info({ jobId: job.id, videoId, formats: TARGET_FORMATS }, "Transcoding complete");
 
-      await generateThumbnail(outputPath, thumbPath);
+      await generateThumbnail(outputPaths["480p"], thumbPath);
       logger.info({ jobId: job.id, videoId }, "Thumbnail generated");
 
-      await uploadToS3(outputPath, outputKey, "video/mp4");
+      for (const format of TARGET_FORMATS) {
+        await uploadToS3(outputPaths[format], outputKeys[format], "video/mp4");
+      }
       await uploadToS3(thumbPath, thumbKey, "image/jpeg");
       logger.info({ jobId: job.id, videoId }, "Uploaded to S3");
 
@@ -54,7 +72,11 @@ const worker = new Worker(
         where: { id: videoId },
         data: {
           status: "processed",
-          variants: { "480p": outputKey },
+          variants: {
+            "480p": outputKeys["480p"],
+            "720p": outputKeys["720p"],
+            "1080p": outputKeys["1080p"],
+          },
           thumbKey,
         },
       });
@@ -97,7 +119,10 @@ const worker = new Worker(
       throw error;
     } finally {
       if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      for (const format of TARGET_FORMATS) {
+        const outputPath = outputPaths[format];
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      }
       if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
       logger.info({ jobId: job.id, videoId }, "Temp files cleaned up");
     }

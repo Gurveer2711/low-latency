@@ -6,9 +6,30 @@ import { s3 } from "../lib/s3"; // S3 connection
 import { config } from "../config/env"; // env variables
 import { transcodeQueue } from "../lib/queue";
 import { logger } from "../lib/logger";
+
+const PLAYBACK_FORMATS = ["480p", "720p", "1080p"] as const;
+type PlaybackFormat = (typeof PLAYBACK_FORMATS)[number];
+
+function isPlaybackFormat(format: string): format is PlaybackFormat {
+  return PLAYBACK_FORMATS.includes(format as PlaybackFormat);
+}
+
 export const getPlaybackUrl = async (req: Request, res: Response) => {
   try {
     const { id } = req.params; // get video id from URL: /videos/abc123/play
+    const requestedFormatRaw = typeof req.query.format === "string" ? req.query.format : "480p";
+    const requestedFormat = requestedFormatRaw.toLowerCase().endsWith("p")
+      ? requestedFormatRaw.toLowerCase()
+      : `${requestedFormatRaw.toLowerCase()}p`;
+
+    if (!isPlaybackFormat(requestedFormat)) {
+      res.status(400).json({
+        error: "Unsupported format",
+        requestedFormat,
+        availableFormats: PLAYBACK_FORMATS,
+      });
+      return;
+    }
 
     // 1. find video in DB
     const video = await prisma.video.findUnique({
@@ -30,20 +51,24 @@ export const getPlaybackUrl = async (req: Request, res: Response) => {
       return;
     }
 
-    // 4. get the 480p key from variants JSON
-    // variants looks like: { "480p": "processed/uuid/480p.mp4" }
+    // variants looks like: { "480p": "...", "720p": "...", "1080p": "..." }
     const variants = video.variants as Record<string, string>;
-    const key480p = variants["480p"];
+    const selectedKey = variants?.[requestedFormat];
 
-    if (!key480p) {
-      res.status(400).json({ error: "No 480p variant available" });
+    if (!selectedKey) {
+      const availableFormats = PLAYBACK_FORMATS.filter((format) => Boolean(variants?.[format]));
+      res.status(400).json({
+        error: "Requested format not available",
+        requestedFormat,
+        availableFormats,
+      });
       return;
     }
 
     // 5. generate presigned GET URL — expires in 1 hour
     const command = new GetObjectCommand({
       Bucket: config.aws.bucket,
-      Key: key480p,
+      Key: selectedKey,
     });
 
     const playUrl = await getSignedUrl(s3, command, {
@@ -66,6 +91,8 @@ export const getPlaybackUrl = async (req: Request, res: Response) => {
       videoId: video.id,
       title: video.title,
       playUrl, // paste this in browser to watch!
+      selectedFormat: requestedFormat,
+      availableFormats: PLAYBACK_FORMATS.filter((format) => Boolean(variants?.[format])),
       thumbUrl,
       expiresIn: 3600,
     });

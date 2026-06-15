@@ -1,4 +1,22 @@
-.env.example
-node_modules
-.env*.mp4
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+.next/
+.nuxt/
+out/
+
+# Coverage
+coverage/
+
+# Cache
+.cache/
+.parcel-cache/
+.eslintcache
+
+# Environment
 .env
+.env.local
+.env.production
