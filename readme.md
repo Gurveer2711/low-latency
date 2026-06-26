@@ -1,129 +1,182 @@
-Preparations (step 0)
+# Video Transcoding and Adaptive Playback Engine
 
-0.1. Install: Docker, Node.js (or your chosen runtime), pnpm/npm, AWS CLI, ffmpeg (locally for quick tests).
-0.2. Create Git repo and branch mvp/basic-pipeline.
-Check: docker --version && node -v && git status returns OK.
+This system manages video uploads, queues encoding jobs, transcodes videos into multiple resolutions asynchronously, and streams them back to users with manual quality selection. 
 
-Step 1 — Create minimal repo layout
+For a non-technical user, the application operates like a private streaming platform: you select a local video file, upload it, wait for processing, and can then watch the video in different resolutions. Technically, the system is a decoupled architecture consisting of a Next.js frontend, an Express API gateway, a Redis-backed BullMQ job queue, a standalone Node.js transcoding worker utilizing FFmpeg, and an AWS S3 object store for asset persistence.
 
-1.1. Locally create folders: api/, worker/, infra/, migrations/, .env.example.
-1.2. Init package.json in api/ and worker/ (you’ll use TypeScript but keep minimal).
-Check: ls shows the folders; cd api && npm init -y works.
+## System Architecture
 
-Step 2 — Run Redis with Docker (Supabase for Postgres)
+The following diagram illustrates how a video files moves through the system, from initial upload request to final playback:
 
-2.1. Create a Supabase project and copy the Postgres connection string from Project Settings -> Database.
-2.2. Run Redis:
-docker run -d --name mvp-redis -p 6379:6379 redis:7
-Check: docker ps shows Redis container; verify Supabase database is reachable with psql or Prisma.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Frontend Client
+    participant API as Express API
+    participant S3 as AWS S3 Bucket
+    participant DB as PostgreSQL (Prisma)
+    participant Redis as Redis (BullMQ)
+    participant Worker as Transcoding Worker
 
-Step 3 — Create Prisma schema + migrate (minimal Video model)
+    Client->>API: POST /upload/request { title, contentType }
+    API->>Client: Returns uploadUrl (presigned S3 PUT URL), videoId, rawKey
+    Client->>S3: PUT raw video file binary
+    Client->>API: POST /webhook/s3-upload { videoId, rawKey, title, userId }
+    API->>DB: Create Video row (status: "pending")
+    API->>Redis: Enqueue transcode-video job { videoId, rawKey }
+    API->>Client: Return status (pending), jobId
+    Note over Client: Polling status via /videos/:id/status
+    
+    Worker->>Redis: Dequeue transcode job
+    Worker->>DB: Update Video status: "processing"
+    Worker->>S3: Download raw video file to local temporary storage
+    Worker->>Worker: Run FFmpeg to generate 480p, 720p, 1080p MP4s
+    Worker->>Worker: Run FFmpeg to generate thumbnail image from 480p MP4
+    Worker->>S3: Upload processed variants and thumbnail
+    Worker->>DB: Update Video status: "processed" (variant & thumb keys)
+    Worker->>Worker: Delete temporary local files
 
-3.1. Install Prisma in api/: npm i -D prisma @prisma/client then npx prisma init.
-3.2. Add Video model with fields: id, title, status, rawKey, variants Json, thumbKey, createdAt, updatedAt.
-3.3. Set DATABASE_URL to Supabase Postgres URL, then run npx prisma migrate dev --name init (local dev) or npx prisma migrate deploy (shared/prod DB).
-Check: Supabase Table Editor shows the Video table or npx prisma studio shows the model.
+    Note over Client: Video status is now "processed"
+    Client->>API: GET /videos/:id/play?format=1080p
+    API->>DB: Check video status and variant availability
+    API->>API: Generate S3 presigned GET URL for selected variant (expires in 1 hr)
+    API->>Client: Return playUrl, thumbUrl, and availableFormats
+    Client->>S3: Stream video chunks directly to HTML5 video element
+```
 
-Step 4 — Add environment config
+### Request Lifecycle
 
-4.1. Create .env with: DATABASE_URL (Supabase Postgres URL), REDIS_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_BUCKET.
-4.2. Add .env.example and do not commit secrets.
-Check: app can read env variables: node -e "console.log(process.env.DATABASE_URL)".
+1. **Presigned Upload Requests**: To avoid proxying large video files through the Node.js API server, the frontend requests a presigned PUT URL from `POST /upload/request`. The API generates a unique video UUID and yields a temporary S3 URL valid for 15 minutes.
+2. **Direct S3 Upload**: The frontend uploads the raw binary file directly to S3 via HTTP PUT. This keeps the API server lightweight and limits network overhead.
+3. **Queue Notification**: Once the upload completes, the frontend sends a POST request to `/webhook/s3-upload`. The API records a new Video row in PostgreSQL with a `pending` status and enqueues a transcode job to the BullMQ queue.
+4. **Asynchronous Transcoding**: The worker dequeues the job, updates the database status to `processing`, and downloads the file from S3 to local temporary storage. It invokes FFmpeg to transcode the video into 480p, 720p, and 1080p MP4 formats and extract a thumbnail. The outputs are uploaded to S3, and the database status updates to `processed`.
+5. **Playback**: When playing a video, the client requests a signed playback URL from `GET /videos/:id/play?format=...`. The backend generates a temporary presigned GET URL (valid for 1 hour) pointing directly to the target resolution variant in S3.
 
-Step 5 — Implement presigned URL endpoint (simple)
+## Tech Stack
 
-5.1. Create POST /upload/request that: receives { title }, generates an S3 key like videos/<uuid>/raw.mp4, returns presigned PUT URL and that key.
-5.2. For dev, you can use aws-sdk S3 presign or @aws-sdk/s3-request-presigner.
-Check: call endpoint locally (curl). It returns { url, key }.
+| Technology | Purpose | Selection Rationale / Alternatives Considered |
+| :--- | :--- | :--- |
+| **Next.js (React 18)** | Frontend UI & routing | Chosen over React SPAs (like Vite) because it integrates routing structures and server components, while TypeScript prevents type mismatch errors at build time. |
+| **Express.js** | API Gateway | Chosen over Python/FastAPI or Go because it uses JavaScript/TypeScript, letting the project share models and interfaces with the frontend, and runs natively with Node-based BullMQ libraries. |
+| **Redis & BullMQ** | Message Queue | Chosen over a simple cron job or AWS SQS. A cron job cannot run in response to immediate user uploads without continuous polling, whereas BullMQ runs jobs immediately, supports automatic backoffs, and registers job states in Redis without AWS SQS/SNS configuration. |
+| **Node.js & FFmpeg** | Transcoding Worker | Chosen over cloud media transcoding APIs (like AWS MediaConvert) because local FFmpeg enables zero-cost scaling of transcoding tasks on our own compute resources and runs locally for development. |
+| **AWS S3** | Object Storage | Chosen over local filesystem storage because it decouples compute from storage, allowing the API and worker processes to scale independently and read/write assets concurrently. |
+| **PostgreSQL (Supabase)** | Relational Database | Chosen over MongoDB because video metadata, user profiles, and ownership mappings have strict relations and require transactional consistency. Prisma ORM is utilized for migrations and type-safe database queries. |
 
-Step 6 — Test direct upload to S3
+## Database Schema
 
-6.1. Using the returned presigned URL do:
-curl --upload-file test.mp4 "<presigned-url>"
-6.2. Verify object exists with AWS CLI:
-aws s3 ls s3://<bucket>/videos/<uuid>/
-Check: AWS CLI lists raw.mp4 (or uploaded key).
+The database contains two primary tables managed by Prisma:
 
-Step 7 — Webhook to receive upload notification (temporary manual)
+### User
+* `id` (String, UUID, Primary Key)
+* `email` (String, Unique)
+* `password` (String, Hashed)
+* `role` (String, defaults to "user")
+* `videos` (Relation to Video model)
+* `createdAt` / `updatedAt` (DateTime)
 
-7.1. Implement POST /webhook/s3-upload that accepts a JSON payload with key and size. (You’ll mimic S3 events first.)
-7.2. On receive: create Video row with status = uploaded, rawKey = key, timestamp. Push a job to Redis/Bull queue with { videoId, key }.
-Check: POST a mock payload via curl; DB has new Video row and Bull queue length increments.
+### Video
+* `id` (String, UUID, Primary Key)
+* `title` (String)
+* `description` (String, Optional)
+* `status` (String, pending, uploaded, processing, processed, failed)
+* `rawKey` (String, S3 key for original file)
+* `thumbKey` (String, S3 key for thumbnail)
+* `variants` (Json, maps resolutions like "480p" to S3 keys)
+* `visibility` (String, public or private)
+* `userId` (String, Foreign Key mapping to User)
+* `createdAt` / `updatedAt` (DateTime)
 
-Step 8 — Setup BullMQ queue (basic)
+## API Endpoints
 
-8.1. Install BullMQ, create a queue transcodeQueue. Backend pushes jobs; worker consumes them.
-8.2. Configure simple retry policy (3 retries).
-Check: push a test job; bull-board or logs show job is in queue.
+### Authentication
+* `POST /auth/register`: Create user account and return JWT token.
+* `POST /auth/login`: Validate credentials and return JWT token.
+* `GET /auth/me`: Retrieve current authenticated user profile.
 
-Step 9 — Worker skeleton
+### Video Operations
+* `POST /upload/request`: Generate S3 presigned upload URL (`rawKey` and `uploadUrl`).
+* `POST /webhook/s3-upload`: Finalize database record creation and queue transcoding job.
+* `GET /videos`: Retrieve all public videos.
+* `GET /videos/mine`: Retrieve logged-in user's videos.
+* `GET /videos/:id/play`: Generate S3 presigned GET URL for selected resolution (`format` query parameter).
+* `GET /videos/:id/status`: Poll current transcode state.
+* `PATCH /videos/:id`: Edit title, description, and visibility.
+* `DELETE /videos/:id`: Delete DB record and remove S3 files.
 
-9.1. In worker/ implement a worker process that consumes transcodeQueue. For now, on job receipt it should: log, set DB status = processing, then exit (placeholder).
-9.2. Run worker locally with node dist/index.js or ts-node.
-Check: Push a job from Step 7, see worker log and DB status updated to processing.
+### Administration
+* `GET /admin/videos`: Fetch metadata for all videos.
+* `GET /admin/users`: Fetch metadata for all registered users.
+* `DELETE /admin/videos/:id`: Administrative video removal.
+* `DELETE /admin/users/:id`: Administrative user removal (cascades to their videos).
 
-Step 10 — Add FFmpeg transcode (single variant 480p)
+## Local Development Setup
 
-10.1. In worker, download file from S3 to /tmp/<videoId>.mp4 (or stream).
-10.2. Run: ffmpeg -i input.mp4 -vf scale=-2:480 -c:a copy output_480.mp4 (simple).
-10.3. Upload output_480.mp4 to S3 at videos/<videoId>/480p.mp4. Update DB: variants = [{resolution:'480p', key: '...'}], status = processed.
-Check: S3 has 480p.mp4 and DB status = processed.
+### Prerequisites
+* Node.js (v18 or higher)
+* Docker (to run Redis)
+* AWS Account with an S3 Bucket (or LocalStack equivalent)
+* PostgreSQL Database (local or Supabase instance)
+* FFmpeg installed locally (the worker runs `ffmpeg` commands via shell execution)
 
-Step 11 — End-to-end test
+### 1. Configuration
+Create a `.env` file in the project root directory using the following template:
 
-11.1. Flow: Request presigned URL → Upload file → POST webhook (or real S3 event later) → job enqueued → worker transcodes → uploads → DB updated.
-11.2. Run through it with a real small video.
-Check: final DB shows processed, S3 contains raw + 480p, worker logs show completed steps.
+```env
+DATABASE_URL="postgresql://user:password@localhost:5432/video_engine"
+REDIS_URL="redis://localhost:6379"
+AWS_ACCESS_KEY_ID="your-aws-access-key"
+AWS_SECRET_ACCESS_KEY="your-aws-secret-key"
+AWS_REGION="us-east-1"
+S3_BUCKET="your-s3-bucket-name"
+PORT=3000
+JWT_SECRET="your-development-jwt-secret"
+```
 
-Step 12 — Add signed playback URL endpoint
+### 2. Database Migration
+Navigate to the `api` directory, install dependencies, and run Prisma migrations:
+```bash
+cd api
+npm install
+npx prisma migrate dev
+```
 
-12.1. Implement GET /videos/:id/play that: verifies user/ownership (for MVP you can skip auth), generates S3 presigned GET URL for 480p.mp4, returns it.
-Check: Call endpoint, open URL in browser — video streams/downloads.
+### 3. Run Infrastructure
+Start Redis using Docker:
+```bash
+docker run -d --name video-redis -p 6379:6379 redis:7
+```
 
-Step 13 — Replace manual webhook with real S3 event (optional iteration)
+### 4. Start the Application
+Run each service in a separate terminal window:
 
-13.1. Configure S3 to send s3:ObjectCreated:Put to an SQS queue or SNS -> HTTP webhook. (For local testing use localstack or continue manual).
-13.2. Confirm webhook receives real S3 event and your endpoint verifies signature.
-Check: Upload via presigned URL triggers webhook and enqueues job automatically.
+**API Server**:
+```bash
+cd api
+npm run dev
+```
 
-Step 14 — Improve reliability: retries + DLQ
+**Transcoding Worker**:
+```bash
+cd worker
+npm install
+npm run dev
+```
 
-14.1. Configure BullMQ retries, add a DLQ queue transcodeDLQ. After N failures, move job to DLQ with error details.
-14.2. Add DB column failCount and lastError.
-Check: Simulate FFmpeg failure; job retries then moves to DLQ; DB records error.
+**Frontend Application**:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:3000` (or the port output by the Next.js process) to access the application.
 
-Step 15 — Add thumbnail generation + incremental DB updates
+## Known Limitations and Incomplete Implementation
 
-15.1. Modify worker to generate a thumbnail with ffmpeg -ss 00:00:02 -i input.mp4 -frames:v 1 thumb.jpg. Upload to S3, set thumbKey in DB.
-15.2. Update DB after each step so dashboard can show progress.
-Check: S3 has thumb.jpg; DB shows thumbnailKey and timestamps for steps.
+This system is a proof-of-concept pipeline and has several structural limitations:
 
-Step 16 — Add logging & observability
-
-16.1. Send structured logs to console + file. Add Sentry/Log service later. Add simple metrics counters for jobs processed, failed.
-Check: Logs show job start/end; metrics counters increment.
-
-Step 17 — Small React dashboard (optional now or later)
-
-17.1. Build a tiny UI that lists videos from DB, shows status, variants, thumbnail, and has Retry button calling POST /videos/:id/retry.
-Check: UI shows DB entries in real time (poll every 5s or use websockets).
-
-Step 18 — Clean up + refactor into final folder structure
-
-18.1. Once MVP works, refactor code into clean structure (controllers/services/models). Add Dockerfiles (include ffmpeg in worker image).
-18.2. Add infra/terraform if you plan IaC (including Supabase-related env/secret wiring).
-Check: All services run with containers; repo structure matches earlier suggested final layout and Supabase connection works.
-
-Step 19 — Harden for prod (quick list)
-
-19.1. Add auth & permission checks on playback.
-19.2. Add DLQ monitoring & alerting.
-19.3. Use CDN with signed URLs for playback.
-19.4. Secure secrets with vault/Secrets Manager.
-Check: Security scan or checklist completed.
-
-Step 20 — Ship & iterate
-
-20.1. Deploy backend + worker to chosen host (Render, Railway, ECS). Use Supabase for Postgres and managed Redis.
-20.2. Monitor logs and iterate on features (multi-res, multipart upload, analytics).
-Check: Live pipeline works end-to-end in cloud.
+* **Client-Triggered Upload Webhook**: Instead of using S3 Event Notifications (SNS/SQS) to trigger the transcoding pipeline, the client notifies the API via `POST /webhook/s3-upload` after a successful upload. This trusts the client to report upload success, which is a security risk in a production system.
+* **Simulated Adaptive Playback**: Adaptive quality switching is simulated client-side. The player reloads the source URL with a different resolution MP4 file and restores the `currentTime` timestamp. The project does not segment videos into HLS (.m3u8) or DASH (.mpd) playlists.
+* **Worker Local Disk Storage**: The worker downloads the entire raw video to the operating system's temp directory before processing. For large files or high concurrency, this could exhaust disk space. A streaming FFmpeg approach or partitioned block storage would be required to scale.
+* **Dead-Letter Queue (DLQ) Integration**: Fully implemented. When a transcoding job exhausts all 3 attempts, the worker programmatically registers the failure payload inside the `transcode-dlq` queue for debugging, while marking the DB video status as `"failed"`.
+* **Authentication Scope**: Token-based authentication using JWTs is active, but lacks production security measures such as secure HTTP-only cookies, token expiration refreshing, and email verification.
