@@ -1,4 +1,4 @@
-import { Worker, Job } from "bullmq";
+import { Worker, Job, Queue } from "bullmq";
 import { config } from "./config/env";
 import { prisma } from "./lib/prisma";
 import { downloadFromS3, uploadToS3 } from "./lib/s3";
@@ -18,6 +18,11 @@ interface TranscodeJobData {
 }
 
 const TARGET_FORMATS: VideoVariantFormat[] = ["480p", "720p", "1080p"];
+
+// dead letter queue — failed jobs land here after all retries exhausted
+const dlQueue = new Queue("transcode-dlq", {
+  connection: { url: config.redis.url },
+});
 
 const worker = new Worker(
   "transcode",
@@ -90,8 +95,17 @@ const worker = new Worker(
       if (isLastAttempt) {
         logger.error(
           { jobId: job.id, videoId, error: err.message },
-          "Job exhausted all retries",
+          "Job exhausted all retries, sending to DLQ",
         );
+
+        // Add the job details into the dead-letter queue
+        await dlQueue.add("transcode-failed", {
+          videoId,
+          rawKey,
+          failedAt: new Date().toISOString(),
+          error: err.message,
+          attempts: job.attemptsMade + 1,
+        });
 
         await prisma.video.update({
           where: { id: videoId },
